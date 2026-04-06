@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>행맨 멀티플레이어 (Firebase)</title>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; }
+    #game { max-width: 700px; margin: 0 auto; background: #333; padding: 25px; border-radius: 15px; }
+    #word { font-size: 3em; letter-spacing: 12px; margin: 30px 0; font-weight: bold; min-height: 60px; }
+    .letters { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 25px 0; }
+    button { padding: 14px 20px; font-size: 1.3em; border: none; border-radius: 10px; cursor: pointer; background: #555; color: white; }
+    button:disabled { background: #444; color: #888; cursor: not-allowed; }
+    #hangman { font-size: 6em; margin: 20px 0; height: 100px; }
+    #status { font-size: 1.5em; margin: 20px 0; min-height: 50px; }
+    input, button { margin: 10px; }
+  </style>
+</head>
+<body>
+  <div id="game">
+    <h1>🏴‍☠️ 행맨 멀티플레이어</h1>
+
+    <div id="setup">
+      <h2>방 만들기 또는 참가하기</h2>
+      <input type="text" id="playerName" placeholder="당신 이름 (예: 철수)" value="플레이어1">
+      <br>
+      <button onclick="createRoom()">방 만들기 (호스트)</button>
+      <br><br>
+      <input type="text" id="roomCode" placeholder="방 코드 입력">
+      <button onclick="joinRoom()">방 참가하기</button>
+    </div>
+
+    <div id="playArea" style="display: none;">
+      <p>방 코드: <strong id="displayRoomCode"></strong> | 당신: <strong id="myName"></strong></p>
+      <div id="hangman">🧍</div>
+      <div id="word">_ _ _ _ _</div>
+      <div id="status">상대를 기다리는 중...</div>
+      
+      <div class="letters" id="alphabet"></div>
+      
+      <div id="info">틀린 횟수: <strong id="wrongCount">0</strong>/6 | 턴: <strong id="currentTurn"></strong></div>
+      
+      <button onclick="resetAll()">새 게임 시작</button>
+    </div>
+  </div>
+
+  <script>
+    // ===== Firebase 설정 =====
+    // 아래 config를 당신의 Firebase 프로젝트 정보로 바꾸세요!
+    const firebaseConfig = {
+  apiKey: "AIzaSyAXXHkhynAuWovLB4pk33elPOX-2OVl7hU",
+  authDomain: "bongbong-41baf.firebaseapp.com",
+  databaseURL: "https://bongbong-41baf-default-rtdb.firebaseio.com",
+  projectId: "bongbong-41baf",
+  storageBucket: "bongbong-41baf.firebasestorage.app",
+  messagingSenderId: "831758172602",
+  appId: "1:831758172602:web:77bea9927b19edaa2b5d83",
+  measurementId: "G-BC41GP0765"
+};
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    let roomId = null;
+    let playerId = null;
+    let isHost = false;
+    let myName = "";
+
+    const hangmanStages = ["🧍", "🧍‍♂️", "🧍‍♂️😟", "🧍‍♂️😟💀", "☠️", "💀💀💀", "💀💀💀💀"];
+
+    function createRoom() {
+      myName = document.getElementById("playerName").value || "플레이어1";
+      roomId = "room_" + Math.floor(100000 + Math.random() * 900000);
+      playerId = "p1";
+      isHost = true;
+
+      const roomRef = db.ref("hangman/" + roomId);
+      roomRef.set({
+        secretWord: "",           // 호스트가 나중에 설정
+        guessed: {},
+        wrong: 0,
+        players: { [playerId]: myName },
+        turn: "p1",
+        status: "waiting"
+      });
+
+      document.getElementById("displayRoomCode").textContent = roomId;
+      document.getElementById("myName").textContent = myName;
+      document.getElementById("setup").style.display = "none";
+      document.getElementById("playArea").style.display = "block";
+
+      listenToRoom();
+      alert(`방이 생성되었습니다!\n친구에게 이 코드를 알려주세요:\n${roomId}`);
+    }
+
+    function joinRoom() {
+      myName = document.getElementById("playerName").value || "플레이어2";
+      roomId = document.getElementById("roomCode").value.trim();
+      if (!roomId) return alert("방 코드를 입력하세요!");
+
+      playerId = "p2";
+      const roomRef = db.ref("hangman/" + roomId);
+
+      roomRef.once("value", (snap) => {
+        if (!snap.exists()) return alert("존재하지 않는 방입니다.");
+
+        roomRef.child("players").child(playerId).set(myName);
+        document.getElementById("displayRoomCode").textContent = roomId;
+        document.getElementById("myName").textContent = myName;
+        document.getElementById("setup").style.display = "none";
+        document.getElementById("playArea").style.display = "block";
+
+        listenToRoom();
+      });
+    }
+
+    function listenToRoom() {
+      const roomRef = db.ref("hangman/" + roomId);
+
+      roomRef.on("value", (snapshot) => {
+        const data = snapshot.val();
+        if (!data) return;
+
+        // 단어가 아직 없으면 호스트에게 입력 요청
+        if (!data.secretWord && isHost) {
+          const word = prompt("단어를 입력하세요 (영어 대문자)").toUpperCase();
+          if (word) roomRef.child("secretWord").set(word);
+          return;
+        }
+
+        updateGameUI(data);
+      });
+    }
+
+    function updateGameUI(data) {
+      if (!data.secretWord) return;
+
+      let display = "";
+      for (let char of data.secretWord) {
+        display += (data.guessed && data.guessed[char]) ? char + " " : "_ ";
+      }
+      document.getElementById("word").textContent = display.trim();
+
+      document.getElementById("wrongCount").textContent = data.wrong || 0;
+      document.getElementById("hangman").textContent = hangmanStages[data.wrong || 0] || "💀";
+
+      const turnName = data.turn === "p1" ? "플레이어1" : "플레이어2";
+      document.getElementById("currentTurn").textContent = turnName;
+
+      // 알파벳 버튼 업데이트
+      createOrUpdateAlphabet(data.guessed || {});
+
+      // 게임 종료 체크
+      const isWin = data.secretWord && [...data.secretWord].every(c => data.guessed && data.guessed[c]);
+      if (isWin) {
+        document.getElementById("status").innerHTML = "🎉 게임 종료! 정답 맞춤!";
+      } else if ((data.wrong || 0) >= 6) {
+        document.getElementById("status").innerHTML = `😢 게임 오버! 정답: ${data.secretWord}`;
+      } else if (data.status === "playing") {
+        document.getElementById("status").textContent = "알파벳을 선택하세요";
+      }
+    }
+
+    function createOrUpdateAlphabet(guessed) {
+      const container = document.getElementById("alphabet");
+      container.innerHTML = "";
+      for (let i = 65; i <= 90; i++) {
+        const letter = String.fromCharCode(i);
+        const btn = document.createElement("button");
+        btn.textContent = letter;
+        btn.disabled = guessed[letter] !== undefined;
+        btn.onclick = () => makeGuess(letter);
+        container.appendChild(btn);
+      }
+    }
+
+    function makeGuess(letter) {
+      if (!roomId) return;
+      const roomRef = db.ref("hangman/" + roomId);
+
+      roomRef.once("value", (snap) => {
+        const data = snap.val();
+        if (!data || !data.secretWord) return;
+
+        // 자신의 턴인지 확인
+        if (data.turn !== playerId) {
+          alert("지금은 상대 턴입니다!");
+          return;
+        }
+
+        const newGuessed = { ...(data.guessed || {}) };
+        let newWrong = data.wrong || 0;
+
+        if (data.secretWord.includes(letter)) {
+          newGuessed[letter] = true;
+        } else {
+          newWrong++;
+        }
+
+        const updates = {
+          guessed: newGuessed,
+          wrong: newWrong,
+          turn: playerId === "p1" ? "p2" : "p1"
+        };
+
+        roomRef.update(updates);
+      });
+    }
+
+    function resetAll() {
+      if (confirm("새 게임을 시작하시겠습니까?")) {
+        const roomRef = db.ref("hangman/" + roomId);
+        roomRef.set({
+          secretWord: "",
+          guessed: {},
+          wrong: 0,
+          players: {},
+          turn: "p1",
+          status: "waiting"
+        });
+      }
+    }
+  </script>
+</body>
+</html>
